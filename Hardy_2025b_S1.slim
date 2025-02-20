@@ -1,0 +1,151 @@
+// A quantitative genetic take on a model relating robustness to
+// evolvability. This version focuses on capacitating epistasis.
+// It expects a few arguments to be passed on the command line.
+// Run like so:
+// slim -d rep=%s -d ps=%s -d q=%s -d -d de=%s Hardy_24_S1.slim
+
+//a membership-testing function
+function (logical)isIn(integer y, integer x){ 
+	return any(asLogical(match(y, x)+1));
+}
+
+initialize() {
+	defineConstant("Rep", rep); //replication number [rep]
+	defineConstant("X", 1.0); //variance multiplier
+	defineConstant("delta", de); //default capacitance
+	//defineConstant("rho", 0.6); //proportion of m1 alleles modified by new m2 allele 
+	defineConstant("tx", 100); //generation at which OX becomes adaptive [100]
+	defineConstant("om0", 1.0); //initial weakness of selection [1.0]
+	defineConstant("q0", q); //ratio of capacitor to target mutations [q]
+	defineConstant("P", ps); //the breadth of allele effect distribution [ps]
+	defineConstant("O1", 0.0); // phenotype optimum in phase 1
+	defineConstant("O2", 5.0); //optimum in phase 2 [6.0]
+	defineConstant("K", 500); //size of population
+	initializeMutationRate(1e-5); //[1e-5]
+	initializeMutationType("m1", 0.5, "n", 0.0, P); //target alleles
+	initializeMutationType("m2", 0.5, "f", 0.0); //epistatic capacitor alleles
+	initializeMutationType("m3", 0.5, "n", 0.0, 1.0); //free alleles
+	initializeGenomicElementType("g1", c(m1,m2,m3), c((1.0-q0),q0,0.0));
+	initializeGenomicElement(g1, 0, 9999);
+	initializeRecombinationRate(0.0); //[1e-6]
+	m1.convertToSubstitution = F;
+	m1.mutationStackPolicy = 'l';
+	m2.convertToSubstitution = F;
+	m2.mutationStackPolicy = 'l';
+	m3.convertToSubstitution = F;
+	m3.mutationStackPolicy = 'l';
+}
+
+mutationEffect(m1) { return 1.0; }
+mutationEffect(m2) { return 1.0; }
+mutationEffect(m3) { return 1.0; }
+
+//a special mutation callback for capacitor alleles
+mutation(m2){ 
+	//who's the target
+	muts1 = genome.mutationsOfType(m1);
+	mut.setValue("Targets", 0);
+	mut.setValue("Epi_effects", 1.0);
+	if (size(muts1)){
+	    //numTargets = min(20, max(1, asInteger(round(rho*size(muts1)))));
+	    numAlphas = size(muts1) ? size(muts1) else 0;
+	    numDraws = size(muts1) ? sample(seq(1,numAlphas),1,replace=F) else 0;
+	    numTargets = min(20, numDraws); 
+	    targets = sample(muts1, numTargets, replace=F);
+	    target_loci = targets.position;
+	    epiEffs = runif(numTargets,-X,X);
+	    mut.setValue("Targets", target_loci);
+	    mut.setValue("Epi_effects", epiEffs);
+	}
+	return T;
+}
+
+
+//let's use a modifyChild() callback to calculate the niche phenotype value
+//based on the m1 and m2 mutations
+modifyChild(){
+	muts1 = child.genomes.mutationsOfType(m1);
+	muts2 = child.genomes.mutationsOfType(m2);
+	muts3 = child.genomes.mutationsOfType(m3);
+	pheno = 0.0;
+	freeo = size(muts3) ? child.sumOfMutationsOfType(m3) else 0.0;
+	capaz = float(length=0);
+	cryp = float(length=0);
+	for (mi in muts1){
+		if (size(muts2)){
+			controllers = muts2[sapply(muts2, "isIn(applyValue.getValue('Targets'),mi.position);")];
+			if (size(controllers)){
+			    epiEff = 0.0;
+			    for (mx in controllers){
+			        mind = which(mx.getValue("Targets")==mi.position);
+			        eE = mx.getValue("Epi_effects")[mind];
+			        epiEff = epiEff + eE;
+			    }  
+				modEff = mi.selectionCoeff * epiEff;
+				pheno = pheno + modEff;
+				capaz = c(capaz, epiEff);
+				del = abs(mi.selectionCoeff - modEff);
+				cryp = c(cryp, del);
+			} else {
+				pheno = pheno + mi.selectionCoeff*delta;
+				capaz = c(capaz, delta);
+				del = abs(mi.selectionCoeff - mi.selectionCoeff*delta);
+				cryp = c(cryp, del);
+			}
+		} else {
+			pheno = pheno + mi.selectionCoeff*delta;
+			capaz = c(capaz, delta);
+			del = abs(mi.selectionCoeff - mi.selectionCoeff*delta);
+			cryp = c(cryp, del);
+		}
+	}
+	child.setValue("p", pheno + freeo);
+	child.setValue("fr", freeo);
+	child.setValue("cap", mean(capaz));
+	child.setValue("cry", sum(cryp));
+	return T;
+}
+
+// set up simple metapopulation
+// and give individuals their initial phenotype states
+1 early() {
+	sim.addSubpop("p1", K);
+	sim.subpopulations.individuals.setValue("p", 0.0);
+	p1.setCloningRate(1.0);
+}
+
+
+//do selection
+1: late(){
+	inds = sim.subpopulations.individuals;
+	scale = dnorm(0.0, 0.0, om0);
+	phenos = inds.getValue("p");
+	y = dnorm(inds.getValue("p"), O1, om0)/(1.5*scale);//[1.2]
+	z = dnorm(inds.getValue("p"), O2, om0)/scale;
+	if (sim.cycle < tx){
+		inds.fitnessScaling = y;
+	} else {
+		inds.fitnessScaling = y + z; //here we combine two normal fitness functions
+	}
+}
+
+//some logging
+100:10000 late(){
+	inds = p1.individuals;
+	mP1 = mean(inds.getValue("p"));
+	mFr = mean(inds.getValue("fr"));
+	mW1 = mean(inds.fitnessScaling);
+	mCap = mean(inds.getValue("cap"));
+	Cry = mean(inds.getValue("cry"));
+	if (sim.cycle % 10 == 0.0){
+		catn(c(sim.cycle, mW1, mP1, mFr, mCap, Cry));
+	}
+	writeFile("log.csv", paste(c(Rep,P,q0,delta,sim.cycle,mP1,mW1,mCap,Cry),sep=','),append=T);
+	thresh = 0.25*O2;
+	if (abs(mP1-O2) < thresh){
+		sim.simulationFinished();
+		catn("Nailed it!");
+	}
+}
+
+

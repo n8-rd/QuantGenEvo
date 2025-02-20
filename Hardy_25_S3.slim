@@ -1,0 +1,129 @@
+// a quantitative genetic take on a model relating robustness to
+// evolvability.
+
+function (logical)isIn(integer y, integer x){ 
+	return any(asLogical(match(y, x)+1));
+}
+
+initialize() {
+	initializeSLiMModelType("nonWF");
+	defineConstant("Rep", rep); //replication number [rep]
+	defineConstant("delta", de); //default capacitance
+	defineConstant("tx", 100); //generation at which OX becomes adaptive [100]
+	defineConstant("om0", 1.0); //initial weakness of selection [1.0] DOn't MESS
+	defineConstant("p0", q); //probability of plastic mutation
+	defineConstant("R", 1.5); //birth rate
+	defineConstant("P", ps); //the breadth of allele effect distribution [ps]
+	defineConstant("O1", 0.0); // phenotype optimum in phase 1 [1]
+	defineConstant("O2", 5.0); //optimum in phase 2 [6.0]
+	defineConstant("K", 500); //size of population
+	defineConstant("M", K / (R-1));
+	defineConstant("m", 0.3);
+	initializeMutationRate(1e-5); //[1e-5]
+	initializeMutationType("m1", 0.5, "n", 0.0, P); //non-plastic alleles (rxn slope)
+	initializeMutationType("m2", 0.5, "f", 0.0); //plastic alleles (rxn elevation)
+	initializeGenomicElementType("g1", c(m1,m2), c(1-p0,p0));
+	initializeGenomicElement(g1, 0, 9999);
+	initializeRecombinationRate(0.0); //[1e-6]
+	m1.convertToSubstitution = F;
+	m1.mutationStackPolicy = 'l';
+	m2.convertToSubstitution = F;
+	m2.mutationStackPolicy = 'l';
+}
+
+mutationEffect(m1) { return 1.0; }
+mutationEffect(m2) { return 1.0; }
+
+mutation(m2){ //plastic alleles
+	re = rnorm(1, 0.0, P);
+	sen = runif(1, 0.0, 2.0);
+	mut.setValue("eff", re);
+	return T;
+}
+
+reproduction() {
+    fecundity = rpois(1, R);
+    for (i in seqLen(fecundity)){
+        offspring = subpop.addCloned(individual);
+    }
+
+}
+
+// set up metapopulation
+// and give individuals their initial phenotype states
+1 early() {
+	sim.addSubpop("p1", K);
+	sim.addSubpop("p2", 0);
+	sim.subpopulations.individuals.setValue("p", 0.0);
+	sim.setValue("baseP", 0.0);
+}
+
+//Do migration.
+100: early() {
+	// random migration
+	nIndividuals = sum(sim.subpopulations.individualCount);
+	nMigrants = rpois(1, nIndividuals * m);
+	migrants = sample(sim.subpopulations.individuals, nMigrants);
+	for (migrant in migrants)
+	{
+		do dest = sample(sim.subpopulations, 1);
+		while (dest == migrant.subpopulation);
+		dest.takeMigrants(migrant);
+	}
+}
+
+
+//do selection and regulation
+1: early(){
+    inds = sim.subpopulations.individuals;
+    muts1 = inds.genomes.mutationsOfType(m1);
+	muts2 = inds.genomes.mutationsOfType(m2);
+	inds1 = inds[inds.subpopulation.id==1];//p1.individuals;
+	inds2 = inds[inds.subpopulation.id==2];
+	scale = dnorm(0.0, 0.0, om0);
+	
+	//do development after migration
+	for (ind in inds){
+	     muts1 = ind.genomes.mutationsOfType(m1);
+	     muts2 = ind.genomes.mutationsOfType(m2);
+	     elevation = size(muts1) ? ind.sumOfMutationsOfType(m1) else 0.0;
+	     Ei = (ind.subpopulation.id - 1);
+	     pp = size(muts2) ? sum(muts2.getValue("eff")*Ei*O2) else 0.0;
+	     pheno = elevation + pp + sim.getValue("baseP");
+	     ind.setValue("p", pheno);
+	}
+	
+	y = dnorm(inds1.getValue("p"), O1, om0)/(scale);
+	if (sim.cycle <100){
+	    y = y + 0.5;
+	}
+	inds1.fitnessScaling = y;
+	if (size(inds2)){
+	    z = dnorm(inds2.getValue("p"), O2, om0)/scale;
+	    inds2.fitnessScaling = z;
+	}
+	n_t_plus_pt5 = sum(inds1.age == 0);
+	p1.fitnessScaling = 1 / (1 + (n_t_plus_pt5 / R) / M);
+	
+	n_t_plus_pt5 = sum(inds2.age == 0);
+	p2.fitnessScaling = 1 / (1 + (n_t_plus_pt5 / R) / M);
+	
+}
+
+//do some logging
+100:5000 late(){
+	inds = sim.subpopulations.individuals;
+	in2s = p2.individuals;
+	mP1 = mean(inds.getValue("p"));
+	mW1 = mean(inds.fitnessScaling);
+	if (sim.cycle % 10 == 0.0){
+		catn(c(sim.cycle, mW1, mP1, size(in2s)));
+		writeFile("log.csv", paste(c(Rep,P,p0,delta,sim.cycle,mP1,mW1,size(in2s)),sep=','),append=T);
+	}
+	if (size(in2s) > 250){
+		sim.simulationFinished();
+		catn("Nailed it!");
+	}
+}
+
+
